@@ -9,19 +9,75 @@ final class CleanManager: ObservableObject {
   @Published var isRunning = false
   @Published var status = ""
   @Published var lastResult: String?
+  @Published var derivedDataSize: String?
+  @Published var simulatorDataSize: String?
+  @Published var activeProjectName: String?
+
+  private var refreshTimer: Timer?
 
   init() {
     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    startPeriodicRefresh()
+  }
+
+  // MARK: - Periodic Info Refresh
+
+  func refreshInfo() {
+    Task {
+      async let ddSize = self.computeDirectorySize(
+        NSHomeDirectory() + "/Library/Developer/Xcode/DerivedData"
+      )
+      async let simSize = self.computeDirectorySize(
+        NSHomeDirectory() + "/Library/Developer/CoreSimulator"
+      )
+      async let project = self.currentProjectName()
+
+      self.derivedDataSize = await ddSize
+      self.simulatorDataSize = await simSize
+      self.activeProjectName = await project
+    }
+  }
+
+  private func startPeriodicRefresh() {
+    refreshInfo()
+    refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+      Task { @MainActor in self?.refreshInfo() }
+    }
+  }
+
+  private func computeDirectorySize(_ path: String) async -> String? {
+    await Task.detached(priority: .utility) {
+      let fm = FileManager.default
+      guard fm.fileExists(atPath: path),
+            let enumerator = fm.enumerator(atPath: path) else { return nil }
+
+      var totalBytes: UInt64 = 0
+      while let file = enumerator.nextObject() as? String {
+        let fullPath = (path as NSString).appendingPathComponent(file)
+        if let attrs = try? fm.attributesOfItem(atPath: fullPath),
+           let size = attrs[.size] as? UInt64 {
+          totalBytes += size
+        }
+      }
+      guard totalBytes > 0 else { return nil }
+      return ByteCountFormatter.string(fromByteCount: Int64(totalBytes), countStyle: .file)
+    }.value
+  }
+
+  private func currentProjectName() async -> String? {
+    guard isXcodeRunning else { return nil }
+    return try? await queryXcodeDocument().projectName
   }
 
   // MARK: - Public Actions
 
   func cleanAll() {
-    run(successMessage: "Xcode project cleaned.") {
+    run {
       let document = try await self.activeXcodeDocument()
+      let projectName = document.projectName
       let derivedData = try self.derivedDataPath(for: document)
 
-      self.status = "Cleaning build..."
+      self.status = "Cleaning build for \(projectName)..."
       try await self.appleScriptCleanBuild(for: document)
 
       self.status = "Deleting Derived Data..."
@@ -29,52 +85,74 @@ final class CleanManager: ObservableObject {
 
       self.status = "Resetting package caches..."
       try await self.xcodeResetPackageCaches()
+
+      return "\(projectName) cleaned."
     }
   }
 
   func deleteDerivedData() {
-    run(successMessage: "Derived Data deleted.") {
+    run {
       let document = try? await self.activeXcodeDocument()
       let derivedData = try self.derivedDataPath(for: document)
 
       self.status = "Deleting Derived Data..."
       try await self.deleteDerivedDataContents(at: derivedData)
+
+      return "Derived Data deleted."
     }
   }
 
   func cleanBuild() {
-    run(successMessage: "Build cleaned.") {
+    run {
       let document = try await self.activeXcodeDocument()
 
-      self.status = "Cleaning build..."
+      self.status = "Cleaning build for \(document.projectName)..."
       try await self.appleScriptCleanBuild(for: document)
+
+      return "\(document.projectName) build cleaned."
     }
   }
 
   func resetPackageCaches() {
-    run(successMessage: "Package caches reset.") {
-      _ = try await self.activeXcodeDocument()
+    run {
+      let document = try await self.activeXcodeDocument()
 
-      self.status = "Resetting package caches..."
+      self.status = "Resetting package caches for \(document.projectName)..."
       try await self.xcodeResetPackageCaches()
+
+      return "\(document.projectName) package caches reset."
     }
   }
 
   func resolvePackages() {
-    run(successMessage: "Packages resolved.") {
-      _ = try await self.activeXcodeDocument()
+    run {
+      let document = try await self.activeXcodeDocument()
 
-      self.status = "Resolving packages..."
+      self.status = "Resolving packages for \(document.projectName)..."
       try await self.xcodeResolvePackageVersions()
+
+      return "\(document.projectName) packages resolved."
+    }
+  }
+
+  func cleanSimulatorData() {
+    run {
+      self.status = "Shutting down simulators..."
+      try await self.shutdownSimulators()
+
+      self.status = "Erasing simulator data..."
+      try await self.eraseSimulatorData()
+
+      self.status = "Deleting unavailable simulators..."
+      try await self.deleteUnavailableSimulators()
+
+      return "Simulator data cleaned."
     }
   }
 
   // MARK: - Operation Runner
 
-  private func run(
-    successMessage: String,
-    operation: @escaping @MainActor () async throws -> Void
-  ) {
+  private func run(operation: @escaping @MainActor () async throws -> String) {
     guard !isRunning else { return }
     Task {
       isRunning = true
@@ -82,12 +160,13 @@ final class CleanManager: ObservableObject {
       defer {
         isRunning = false
         status = ""
+        refreshInfo()
       }
       do {
-        try await operation()
-        lastResult = successMessage
-        NSLog("[XcodeClean] %@", successMessage)
-        notify(successMessage)
+        let message = try await operation()
+        lastResult = message
+        NSLog("[XcodeClean] %@", message)
+        notify(message)
       } catch {
         let message = (error as? CleanError)?.userMessage
           ?? "Failed: \(error.localizedDescription)"
@@ -101,26 +180,37 @@ final class CleanManager: ObservableObject {
   // MARK: - Derived Data
 
   private func deleteDerivedDataContents(at path: String) async throws {
-    try await onBackgroundThread {
+    let items: [String] = try await onBackgroundThread {
       let fm = FileManager.default
-      guard fm.fileExists(atPath: path) else { return }
+      guard fm.fileExists(atPath: path) else { return [] }
+      return try fm.contentsOfDirectory(atPath: path)
+    }
+    guard !items.isEmpty else { return }
 
-      let items = try fm.contentsOfDirectory(atPath: path)
-      var failures: [String] = []
+    let failures = await withTaskGroup(of: String?.self, returning: [String].self) { group in
       for item in items {
-        let itemPath = (path as NSString).appendingPathComponent(item)
-        do {
-          try fm.removeItem(atPath: itemPath)
-        } catch {
-          NSLog("[XcodeClean] Could not remove %@: %@", item, error.localizedDescription)
-          failures.append(item)
+        group.addTask {
+          let itemPath = (path as NSString).appendingPathComponent(item)
+          do {
+            try FileManager.default.removeItem(atPath: itemPath)
+            return nil
+          } catch {
+            NSLog("[XcodeClean] Could not remove %@: %@", item, error.localizedDescription)
+            return item
+          }
         }
       }
-      if !failures.isEmpty, failures.count == items.count {
-        throw CleanError.operationFailed(
-          "Could not delete any items in Derived Data. Files may be locked by Xcode."
-        )
+      var failed: [String] = []
+      for await result in group {
+        if let name = result { failed.append(name) }
       }
+      return failed
+    }
+
+    if !failures.isEmpty, failures.count == items.count {
+      throw CleanError.operationFailed(
+        "Could not delete any items in Derived Data. Files may be locked by Xcode."
+      )
     }
   }
 
@@ -217,19 +307,99 @@ final class CleanManager: ObservableObject {
       """)
   }
 
+  // MARK: - Simulator Operations
+
+  private func shutdownSimulators() async throws {
+    try await shell("/usr/bin/xcrun", arguments: ["simctl", "shutdown", "all"], timeout: 30)
+  }
+
+  private func eraseSimulatorData() async throws {
+    try await shell("/usr/bin/xcrun", arguments: ["simctl", "erase", "all"], timeout: 60)
+  }
+
+  private func deleteUnavailableSimulators() async throws {
+    try await shell("/usr/bin/xcrun", arguments: ["simctl", "delete", "unavailable"], timeout: 30)
+  }
+
+  private func shell(
+    _ executable: String,
+    arguments: [String],
+    timeout: TimeInterval
+  ) async throws {
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+      DispatchQueue.global(qos: .userInitiated).async {
+        let process = Process()
+        let errorPipe = Pipe()
+
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errorPipe
+
+        do {
+          try process.run()
+        } catch {
+          let name = URL(fileURLWithPath: executable).lastPathComponent
+          continuation.resume(throwing: CleanError.operationFailed("Failed to launch \(name)."))
+          return
+        }
+
+        let timer = DispatchSource.makeTimerSource(queue: .global())
+        timer.schedule(deadline: .now() + timeout)
+        timer.setEventHandler {
+          if process.isRunning { process.terminate() }
+        }
+        timer.resume()
+
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        timer.cancel()
+
+        let name = URL(fileURLWithPath: executable).lastPathComponent
+
+        if process.terminationReason == .uncaughtSignal {
+          continuation.resume(throwing: CleanError.operationFailed("\(name) timed out."))
+          return
+        }
+
+        guard process.terminationStatus == 0 else {
+          let stderr = String(data: errorData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+          NSLog("[XcodeClean] %@ failed (%d): %@", name, process.terminationStatus, stderr)
+          continuation.resume(
+            throwing: CleanError.operationFailed(stderr.isEmpty ? "\(name) failed." : stderr)
+          )
+          return
+        }
+
+        continuation.resume()
+      }
+    }
+  }
+
   // MARK: - Active Xcode Document (AppleScript)
 
   private func activeXcodeDocument() async throws -> XcodeDocument {
-    let maxAttempts = 5
+    guard isXcodeRunning else {
+      throw CleanError.xcodeNotRunning
+    }
+
+    let maxAttempts = 3
     for attempt in 1...maxAttempts {
       do {
         return try await queryXcodeDocument()
-      } catch where attempt < maxAttempts {
-        NSLog("[XcodeClean] Waiting for Xcode document (attempt %d/%d)...", attempt, maxAttempts)
-        try await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+      } catch CleanError.xcodeLoading where attempt < maxAttempts {
+        NSLog("[XcodeClean] Workspace loading (attempt %d/%d), retrying...", attempt, maxAttempts)
+        try await Task.sleep(nanoseconds: 2_000_000_000)
       }
     }
     return try await queryXcodeDocument()
+  }
+
+  private var isXcodeRunning: Bool {
+    NSWorkspace.shared.runningApplications.contains {
+      $0.bundleIdentifier == "com.apple.dt.Xcode"
+    }
   }
 
   private func queryXcodeDocument() async throws -> XcodeDocument {
@@ -238,9 +408,7 @@ final class CleanManager: ObservableObject {
         let script = NSAppleScript(source: """
           tell application "Xcode"
             if not (exists active workspace document) then return ""
-            if not (loaded of active workspace document) then
-              error "The active Xcode workspace is still loading."
-            end if
+            if not (loaded of active workspace document) then return "LOADING"
             return path of active workspace document
           end tell
           """)
@@ -263,9 +431,12 @@ final class CleanManager: ObservableObject {
         }
 
         let path = result?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if path.isEmpty {
+        switch path {
+        case "":
           continuation.resume(throwing: CleanError.noOpenProject)
-        } else {
+        case "LOADING":
+          continuation.resume(throwing: CleanError.xcodeLoading)
+        default:
           continuation.resume(returning: XcodeDocument(path: path))
         }
       }
@@ -300,12 +471,13 @@ final class CleanManager: ObservableObject {
     }
   }
 
-  private func onBackgroundThread(_ work: @escaping @Sendable () throws -> Void) async throws {
-    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+  private func onBackgroundThread<T: Sendable>(
+    _ work: @escaping @Sendable () throws -> T
+  ) async throws -> T {
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
       DispatchQueue.global(qos: .userInitiated).async {
         do {
-          try work()
-          continuation.resume()
+          continuation.resume(returning: try work())
         } catch {
           continuation.resume(throwing: error)
         }
@@ -338,11 +510,17 @@ struct XcodeDocument {
     default: .unknown
     }
   }
+
+  var projectName: String {
+    ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+  }
 }
 
 enum CleanError: LocalizedError {
   case noOpenProject
   case notAuthorized
+  case xcodeNotRunning
+  case xcodeLoading
   case operationFailed(String)
 
   var userMessage: String {
@@ -351,6 +529,10 @@ enum CleanError: LocalizedError {
       "No open Xcode project or workspace found."
     case .notAuthorized:
       "Not authorized to control Xcode. Grant permission in System Settings → Privacy & Security → Automation."
+    case .xcodeNotRunning:
+      "Xcode is not running."
+    case .xcodeLoading:
+      "Xcode is still loading the workspace. Try again in a moment."
     case .operationFailed(let message):
       message
     }
