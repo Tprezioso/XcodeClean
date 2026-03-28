@@ -17,9 +17,45 @@ If you've ever wasted time navigating to `~/Library/Developer/Xcode/DerivedData`
 - **Active Project Detection** — Displays which Xcode project will be targeted before you click
 - **Launch at Login** — Optional toggle to start XcodeClean automatically
 
+## Installation
+
+### Download (Recommended)
+
+1. Go to the [Releases](../../releases/latest) page
+2. Download `XcodeClean.zip`
+3. Unzip and drag `XcodeClean.app` to your **Applications** folder
+4. Double-click to launch — the app appears as an icon in your menu bar
+
+> **Note:** Since the app is not notarized, macOS will block it the first time. To open it:
+>
+> - **Right-click** (or Control-click) on `XcodeClean.app` and select **Open**
+> - Click **Open** in the dialog that appears
+>
+> You only need to do this once. Alternatively, you can remove the quarantine attribute:
+> ```bash
+> xattr -d com.apple.quarantine /Applications/XcodeClean.app
+> ```
+
+### Build from Source
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/Starter-Pack-Studios/XcodeClean.git
+   ```
+2. Open `XcodeClean.xcodeproj` in Xcode
+3. Select your development team in **Signing & Capabilities** (or leave as "Sign to Run Locally")
+4. Build and run (`Cmd+R`)
+
+The app will appear as a bin icon in your menu bar.
+
+### Requirements
+
+- macOS 14.0 (Sonoma) or later
+- Xcode installed (for build cleaning and package operations)
+
 ## Keyboard Shortcuts
 
-All shortcuts use **Cmd + Shift + Option** as the modifier:
+All shortcuts use **Cmd + Shift + Option** as the modifier and work globally from any app:
 
 | Action | Shortcut |
 |---|---|
@@ -30,8 +66,6 @@ All shortcuts use **Cmd + Shift + Option** as the modifier:
 | Resolve Package Versions | `Cmd+Shift+Option+P` |
 | Clean Simulator Data | `Cmd+Shift+Option+S` |
 
-These work globally — you don't need to have XcodeClean focused.
-
 ## Clean All Order of Operations
 
 The "Clean All" action runs steps in a specific order to avoid Xcode's "unable to initiate PIF transfer session" error:
@@ -40,43 +74,25 @@ The "Clean All" action runs steps in a specific order to avoid Xcode's "unable t
 2. **Delete Derived Data** — Removes build artifacts after Xcode is done processing
 3. **Reset Package Caches** — Clears and re-resolves packages into a fresh DerivedData, leaving you ready to build
 
-## Requirements
-
-- macOS 14.0 (Sonoma) or later
-- Xcode installed (for build cleaning and package operations)
-
-## Installation
-
-### Build from Source
-
-1. Clone the repository:
-   ```
-   git clone https://github.com/YOUR_USERNAME/XcodeClean.git
-   ```
-2. Open `XcodeClean.xcodeproj` in Xcode
-3. Build and run (Cmd+R)
-
-The app will appear as a bin icon in your menu bar.
-
 ## Permissions
 
-XcodeClean requires two macOS permissions to function. You'll be prompted to grant these the first time you use the app.
+XcodeClean requires two macOS permissions to function. You'll be prompted to grant these the first time you use each feature.
 
-### Automation (required)
+### Automation
 
 XcodeClean uses AppleScript to communicate with Xcode for clean build operations.
 
 **System Settings > Privacy & Security > Automation** — Allow XcodeClean to control Xcode.
 
-### Accessibility (required for package operations)
+### Accessibility
 
 Package cache and resolve operations work by triggering Xcode's own menu items via System Events, which requires Accessibility access.
 
 **System Settings > Privacy & Security > Accessibility** — Allow XcodeClean.
 
-### Resetting Permissions
+### Troubleshooting Permissions
 
-If permissions get stuck or denied, you can reset them from Terminal:
+If permissions get stuck or were denied and don't appear in System Settings, reset them from Terminal:
 
 ```bash
 # Reset Automation permission
@@ -86,7 +102,7 @@ tccutil reset AppleEvents
 tccutil reset Accessibility
 ```
 
-Then relaunch XcodeClean to be prompted again.
+Then relaunch XcodeClean — macOS will prompt you again.
 
 ## How It Works
 
@@ -129,6 +145,7 @@ Contributions are welcome! Some ideas for future improvements:
 - Per-project size breakdown in the menu
 - Configurable keyboard shortcuts
 - Auto-clean when DerivedData exceeds a size threshold
+- Homebrew Cask formula
 
 ## License
 
