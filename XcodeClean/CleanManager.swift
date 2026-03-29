@@ -83,6 +83,9 @@ final class CleanManager: ObservableObject {
       self.status = "Deleting Derived Data..."
       try await self.deleteDerivedDataContents(at: derivedData)
 
+      self.status = "Waiting for Xcode to be ready..."
+      try await self.waitForXcodeReady(document: document)
+
       self.status = "Resetting package caches..."
       try await self.xcodeResetPackageCaches()
 
@@ -271,6 +274,34 @@ final class CleanManager: ObservableObject {
         end if
         set err to error message of actionResult
         if err is not missing value then error err
+      end tell
+      """)
+  }
+
+  // MARK: - Wait for Xcode Ready
+
+  private func waitForXcodeReady(document: XcodeDocument, timeout: TimeInterval = 30) async throws {
+    let escapedPath = document.path.replacingOccurrences(of: "\\", with: "\\\\")
+      .replacingOccurrences(of: "\"", with: "\\\"")
+    try await runAppleScript("""
+      tell application "Xcode"
+        set deadline to (current date) + \(Int(timeout))
+        repeat
+          if (current date) > deadline then
+            error "Xcode did not become ready within \(Int(timeout)) seconds."
+          end if
+          try
+            set targetDoc to missing value
+            repeat with doc in workspace documents
+              if path of doc is "\(escapedPath)" then
+                set targetDoc to doc
+                exit repeat
+              end if
+            end repeat
+            if targetDoc is not missing value and loaded of targetDoc then exit repeat
+          end try
+          delay 0.5
+        end repeat
       end tell
       """)
   }
