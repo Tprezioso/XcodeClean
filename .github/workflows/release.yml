@@ -73,7 +73,19 @@ jobs:
 
       - name: Staple
         run: |
-          xcrun stapler staple "XcodeClean.app"
+          for i in 1 2 3; do
+            echo "Staple attempt $i..."
+            if xcrun stapler staple "XcodeClean.app"; then
+              echo "Staple succeeded."
+              break
+            fi
+            if [ $i -eq 3 ]; then
+              echo "Staple failed after 3 attempts."
+              exit 1
+            fi
+            echo "Waiting 30 seconds for ticket propagation..."
+            sleep 30
+          done
           ditto -c -k --keepParent "XcodeClean.app" "XcodeClean.zip"
 
       - name: Create Release
