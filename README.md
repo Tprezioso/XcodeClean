@@ -26,15 +26,7 @@ If you've ever wasted time navigating to `~/Library/Developer/Xcode/DerivedData`
 3. Unzip and drag `XcodeClean.app` to your **Applications** folder
 4. Double-click to launch — the app appears as an icon in your menu bar
 
-> **Note:** Since the app is not notarized, macOS will block it the first time. To open it:
->
-> - **Right-click** (or Control-click) on `XcodeClean.app` and select **Open**
-> - Click **Open** in the dialog that appears
->
-> You only need to do this once. Alternatively, you can remove the quarantine attribute:
-> ```bash
-> xattr -d com.apple.quarantine /Applications/XcodeClean.app
-> ```
+The app is signed and notarized by Apple, so it will open without any security warnings.
 
 ### Build from Source
 
