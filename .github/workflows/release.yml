@@ -65,14 +65,33 @@ jobs:
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          xcrun notarytool submit "XcodeClean.zip" \
+          SUBMIT_OUTPUT=$(xcrun notarytool submit "XcodeClean.zip" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait
+            --wait 2>&1)
+          echo "$SUBMIT_OUTPUT"
+
+          SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
+          echo "Submission ID: $SUBMISSION_ID"
+
+          echo "Fetching notarization log..."
+          xcrun notarytool log "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            notarization_log.json || true
+          cat notarization_log.json || true
+
+          if echo "$SUBMIT_OUTPUT" | grep -q "status: Invalid"; then
+            echo "Notarization failed. See log above."
+            exit 1
+          fi
 
       - name: Staple
         run: |
+          echo "Waiting 60 seconds for ticket propagation..."
+          sleep 60
           for i in 1 2 3; do
             echo "Staple attempt $i..."
             if xcrun stapler staple "XcodeClean.app"; then
@@ -83,8 +102,8 @@ jobs:
               echo "Staple failed after 3 attempts."
               exit 1
             fi
-            echo "Waiting 30 seconds for ticket propagation..."
-            sleep 30
+            echo "Waiting 60 seconds..."
+            sleep 60
           done
           ditto -c -k --keepParent "XcodeClean.app" "XcodeClean.zip"
 
