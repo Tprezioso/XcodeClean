@@ -14,6 +14,19 @@ final class CleanManager: ObservableObject {
   @Published var activeProjectName: String?
 
   private var refreshTimer: Timer?
+  private var isRefreshing = false
+
+  private let compiledQueryScript: NSAppleScript? = {
+    let script = NSAppleScript(source: """
+      tell application "Xcode"
+        if not (exists active workspace document) then return ""
+        if not (loaded of active workspace document) then return "LOADING"
+        return path of active workspace document
+      end tell
+      """)
+    script?.compileAndReturnError(nil)
+    return script
+  }()
 
   init() {
     UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -23,7 +36,10 @@ final class CleanManager: ObservableObject {
   // MARK: - Periodic Info Refresh
 
   func refreshInfo() {
+    guard !isRefreshing else { return }
+    isRefreshing = true
     Task {
+      defer { isRefreshing = false }
       async let ddSize = self.computeDirectorySize(
         NSHomeDirectory() + "/Library/Developer/Xcode/DerivedData"
       )
@@ -40,24 +56,29 @@ final class CleanManager: ObservableObject {
 
   private func startPeriodicRefresh() {
     refreshInfo()
-    refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+    refreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
       Task { @MainActor in self?.refreshInfo() }
     }
   }
 
   private func computeDirectorySize(_ path: String) async -> String? {
     await Task.detached(priority: .utility) {
+      let url = URL(fileURLWithPath: path, isDirectory: true)
       let fm = FileManager.default
+      let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .isRegularFileKey]
       guard fm.fileExists(atPath: path),
-            let enumerator = fm.enumerator(atPath: path) else { return nil }
+            let enumerator = fm.enumerator(
+              at: url,
+              includingPropertiesForKeys: keys,
+              options: [.skipsHiddenFiles]
+            ) else { return nil }
 
       var totalBytes: UInt64 = 0
-      while let file = enumerator.nextObject() as? String {
-        let fullPath = (path as NSString).appendingPathComponent(file)
-        if let attrs = try? fm.attributesOfItem(atPath: fullPath),
-           let size = attrs[.size] as? UInt64 {
-          totalBytes += size
-        }
+      while let fileURL = enumerator.nextObject() as? URL {
+        guard let values = try? fileURL.resourceValues(forKeys: Set(keys)),
+              values.isRegularFile == true,
+              let size = values.totalFileAllocatedSize else { continue }
+        totalBytes += UInt64(size)
       }
       guard totalBytes > 0 else { return nil }
       return ByteCountFormatter.string(fromByteCount: Int64(totalBytes), countStyle: .file)
@@ -435,17 +456,14 @@ final class CleanManager: ObservableObject {
 
   private func queryXcodeDocument() async throws -> XcodeDocument {
     try await withCheckedThrowingContinuation { continuation in
-      DispatchQueue.main.async {
-        let script = NSAppleScript(source: """
-          tell application "Xcode"
-            if not (exists active workspace document) then return ""
-            if not (loaded of active workspace document) then return "LOADING"
-            return path of active workspace document
-          end tell
-          """)
+      DispatchQueue.global(qos: .userInitiated).async { [compiledQueryScript] in
+        guard let script = compiledQueryScript else {
+          continuation.resume(throwing: CleanError.operationFailed("Failed to compile AppleScript."))
+          return
+        }
 
         var errorInfo: NSDictionary?
-        let result = script?.executeAndReturnError(&errorInfo)
+        let result = script.executeAndReturnError(&errorInfo)
 
         if let errorInfo {
           let message = errorInfo[NSAppleScript.errorMessage] as? String
@@ -461,7 +479,7 @@ final class CleanManager: ObservableObject {
           return
         }
 
-        let path = result?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let path = result.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         switch path {
         case "":
           continuation.resume(throwing: CleanError.noOpenProject)
@@ -478,7 +496,7 @@ final class CleanManager: ObservableObject {
 
   private func runAppleScript(_ source: String) async throws {
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-      DispatchQueue.main.async {
+      DispatchQueue.global(qos: .userInitiated).async {
         let script = NSAppleScript(source: source)
         var errorInfo: NSDictionary?
         script?.executeAndReturnError(&errorInfo)
